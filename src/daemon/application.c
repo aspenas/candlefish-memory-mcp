@@ -1575,7 +1575,8 @@ static cbm_daemon_application_job_t *application_find_active_job_locked(
 
 static char *application_index_project_key(const char *root_path, const char *args_json) {
     char *override = cbm_mcp_get_string_arg(args_json, "name");
-    char *key = cbm_project_name_from_path(override && override[0] ? override : root_path);
+    char *key = override && override[0] ? cbm_project_name_from_literal(override)
+                                        : cbm_project_name_from_path(root_path);
     free(override);
     return key;
 }

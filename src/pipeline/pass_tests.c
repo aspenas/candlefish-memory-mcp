@@ -66,6 +66,13 @@ bool cbm_is_test_path(const char *path) {
     base = base ? base + SKIP_ONE : path;
     size_t len = strlen(path);
 
+    /* SwiftPM and Xcode use capitalized Tests directories and *Tests.swift. */
+    if (str_ends_with(path, len, ".swift") &&
+        (str_ends_with(path, len, "Test.swift") || str_ends_with(path, len, "Tests.swift") ||
+         strncmp(path, "Tests/", SLEN("Tests/")) == 0 || strstr(path, "/Tests/"))) {
+        return true;
+    }
+
     /* Prefix-based: Python test_*.py */
     if (strncmp(base, "test_", SLEN("test_")) == 0) {
         return true;

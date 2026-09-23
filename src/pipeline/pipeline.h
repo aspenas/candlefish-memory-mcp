@@ -80,6 +80,9 @@ void cbm_pipeline_free(cbm_pipeline_t *p);
 #define CBM_PIPELINE_ABORT_OVER_BUDGET (-5)
 /* Opt-in discovery/resource policy breach: fail the attempt, keep serving DB. */
 #define CBM_PIPELINE_RESOURCE_LIMIT (-6)
+/* Existing readable DB belongs to another project name or canonical root.
+ * The DB has not been modified and its previous graph remains available. */
+#define CBM_PIPELINE_PROJECT_IDENTITY_CONFLICT (-7)
 int cbm_pipeline_run(cbm_pipeline_t *p);
 
 /* Request cancellation of a running pipeline (thread-safe). */
@@ -205,6 +208,11 @@ char *cbm_pipeline_resolve_relative_import(const char *source_rel, const char *m
  * Replaces / and : with -, collapses --, trims leading -.
  * Caller must free() the returned string. */
 char *cbm_project_name_from_path(const char *abs_path);
+
+/* Normalize an explicit project name without interpreting it as a filesystem
+ * path. Uses the same portable character mapping and length cap as derived
+ * names, but its result never depends on the current working directory. */
+char *cbm_project_name_from_literal(const char *name);
 
 /* ── Function Registry ──────────────────────────────────────────── */
 

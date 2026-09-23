@@ -1294,6 +1294,73 @@ TEST(watcher_detects_git_commit) {
     PASS();
 }
 
+TEST(watcher_detects_commit_before_first_poll) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_watcher_early_commit_XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+    ASSERT_EQ(wt_git(tmpdir, "init -q"), 0);
+    char path[300];
+    th_write_file(wt_path(path, sizeof(path), tmpdir, "file.txt"), "first\n");
+    ASSERT_EQ(wt_git(tmpdir, "add file.txt"), 0);
+    ASSERT_EQ(wt_git(tmpdir, "commit -q -m first"), 0);
+
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *w = cbm_watcher_new(store, index_callback, NULL);
+    ASSERT_TRUE(cbm_watcher_watch(w, "early-commit", tmpdir));
+    index_call_count = 0;
+
+    /* The first background poll has not run yet. A commit now must not be
+     * swallowed when that poll initializes the rest of the Git baseline. */
+    th_append_file(path, "second\n");
+    ASSERT_EQ(wt_git(tmpdir, "add file.txt"), 0);
+    ASSERT_EQ(wt_git(tmpdir, "commit -q -m second"), 0);
+    (void)cbm_watcher_poll_once(w); /* initializes baseline */
+    cbm_watcher_touch(w, "early-commit");
+    (void)cbm_watcher_poll_once(w);
+    int observed = index_call_count;
+
+    cbm_watcher_free(w);
+    cbm_store_close(store);
+    th_rmtree(tmpdir);
+    ASSERT_EQ(observed, 1);
+    PASS();
+}
+
+TEST(watcher_detects_monorepo_commit_before_first_poll) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_watcher_early_mono_XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+    ASSERT_EQ(wt_git(tmpdir, "init -q"), 0);
+    char package[400];
+    snprintf(package, sizeof(package), "%s/package", tmpdir);
+    ASSERT_TRUE(cbm_mkdir_p(package, 0755));
+    char path[500];
+    th_write_file(wt_path(path, sizeof(path), package, "file.txt"), "first\n");
+    ASSERT_EQ(wt_git(tmpdir, "add -A"), 0);
+    ASSERT_EQ(wt_git(tmpdir, "commit -q -m first"), 0);
+
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *w = cbm_watcher_new(store, index_callback, NULL);
+    ASSERT_TRUE(cbm_watcher_watch(w, "early-mono", package));
+    index_call_count = 0;
+
+    th_append_file(path, "second\n");
+    ASSERT_EQ(wt_git(tmpdir, "add -A"), 0);
+    ASSERT_EQ(wt_git(tmpdir, "commit -q -m second"), 0);
+    (void)cbm_watcher_poll_once(w); /* initializes baseline */
+    cbm_watcher_touch(w, "early-mono");
+    (void)cbm_watcher_poll_once(w);
+    int observed = index_call_count;
+
+    cbm_watcher_free(w);
+    cbm_store_close(store);
+    th_rmtree(tmpdir);
+    ASSERT_EQ(observed, 1);
+    PASS();
+}
+
 /* A plain directory that merely SITS UNDER an unrelated repository is not a git
  * project. `git rev-parse --git-dir` walks up, so it answers yes for such a
  * folder, and the watcher then inherited the ancestor's dirty state — which is
@@ -3611,6 +3678,8 @@ SUITE(watcher) {
 
     /* Git change detection */
     RUN_TEST(watcher_detects_git_commit);
+    RUN_TEST(watcher_detects_commit_before_first_poll);
+    RUN_TEST(watcher_detects_monorepo_commit_before_first_poll);
     RUN_TEST(watcher_nested_non_git_dir_does_not_inherit_ancestor_dirt);
     RUN_TEST(watcher_monorepo_subdir_ignores_sibling_changes);
     RUN_TEST(watcher_detects_sha256_git_commit);

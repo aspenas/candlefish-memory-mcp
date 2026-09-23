@@ -42,6 +42,7 @@ enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 6 };
 #include "foundation/mem_core.h"
 #include "result_spill.h"
 #include "foundation/secure_random.h"
+#include "sqlite3.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -394,7 +395,7 @@ bool cbm_pipeline_set_project_name(cbm_pipeline_t *p, const char *name) {
         return false;
     }
 
-    char *normalized = cbm_project_name_from_path(name);
+    char *normalized = cbm_project_name_from_literal(name);
     if (!normalized) {
         return false;
     }
@@ -3383,6 +3384,118 @@ static void sweep_orphan_stages(const char *final_path) {
     free(dir_path);
 }
 
+enum { PL_EXPECTED_PRIMARY_PROJECTS = 1, PL_PROJECT_ROOT_COLUMN = 1 };
+
+static int pipeline_check_project_row(sqlite3_stmt *stmt, const char *db_path,
+                                      const char *repo_path, const char *project_name,
+                                      const char *requested, int *primary_count) {
+    const char *stored_name = (const char *)sqlite3_column_text(stmt, 0);
+    const char *stored = (const char *)sqlite3_column_text(stmt, PL_PROJECT_ROOT_COLUMN);
+    size_t project_len = strlen(project_name);
+    bool primary = stored_name && strcmp(stored_name, project_name) == 0;
+    bool miss_graph = stored_name && strncmp(stored_name, project_name, project_len) == 0 &&
+                      strcmp(stored_name + project_len, "::missed") == 0;
+    if (miss_graph && stored && stored[0] == '\0') {
+        return 0;
+    }
+    if (!primary || ++*primary_count != PL_EXPECTED_PRIMARY_PROJECTS) {
+        cbm_log_warn("pipeline.project_name_mismatch", "db", db_path, "stored_project",
+                     stored_name ? stored_name : "", "requested_project", project_name);
+        return CBM_PIPELINE_PROJECT_IDENTITY_CONFLICT;
+    }
+    char canonical[CBM_SZ_4K];
+    if (!stored || !cbm_canonical_path(stored, canonical, sizeof(canonical))) {
+        return CBM_PIPELINE_PROJECT_IDENTITY_CONFLICT;
+    }
+    cbm_normalize_path_sep(canonical);
+    if (strcmp(requested, canonical) != 0) {
+        cbm_log_warn("pipeline.project_root_mismatch", "db", db_path, "stored_root", stored,
+                     "requested_root", repo_path);
+        return CBM_PIPELINE_PROJECT_IDENTITY_CONFLICT;
+    }
+    return 0;
+}
+
+/* A portable project name is not a unique encoding of its source path. Check
+ * the original database before any staging, backup, or orphan cleanup: an
+ * incremental no-op may never reach the graph buffer's project upsert. */
+static int pipeline_check_existing_root(const char *db_path, const char *repo_path,
+                                        const char *project_name) {
+    struct stat st;
+    if (stat(db_path, &st) != 0) {
+        return errno == ENOENT ? 0 : CBM_PIPELINE_ABORT_PRESERVE_DB;
+    }
+
+    char db_file[CBM_SZ_4K];
+    char requested[CBM_SZ_4K];
+    if (!cbm_path_for_file_api(db_path, db_file, sizeof(db_file)) ||
+        !cbm_canonical_path(repo_path, requested, sizeof(requested))) {
+        return CBM_PIPELINE_ABORT_PRESERVE_DB;
+    }
+    cbm_normalize_path_sep(requested);
+
+    /* An obviously non-SQLite destination has no project identity to bind.
+     * Keep the existing quarantine/publish path for such files, including
+     * corrupt main files accompanied by unusable WAL sidecars. A valid SQLite
+     * header still requires a successful read-only project query below. */
+    static const char sqlite_header[] = "SQLite format 3";
+    char header[sizeof(sqlite_header)];
+    FILE *file = cbm_fopen(db_path, "rb");
+    if (!file) {
+        return CBM_PIPELINE_ABORT_PRESERVE_DB;
+    }
+    size_t header_size = fread(header, sizeof(header[0]), sizeof(header), file);
+    bool read_failed = ferror(file) != 0;
+    (void)fclose(file);
+    if (read_failed) {
+        return CBM_PIPELINE_ABORT_PRESERVE_DB;
+    }
+    if (header_size != sizeof(header) || memcmp(header, sqlite_header, sizeof(header)) != 0) {
+        return 0;
+    }
+
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open_v2(db_file, &db, SQLITE_OPEN_READONLY, NULL);
+    if (rc != SQLITE_OK) {
+        sqlite3_close(db);
+        return CBM_PIPELINE_ABORT_PRESERVE_DB;
+    }
+    sqlite3_stmt *stmt = NULL;
+    static const char query[] = "SELECT name, root_path FROM projects;";
+    rc = sqlite3_prepare_v2(db, query, (int)sizeof(query), &stmt, NULL);
+    if (rc == SQLITE_NOTADB || rc == SQLITE_CORRUPT) {
+        /* The existing publish path quarantines a corrupt destination after a
+         * complete replacement graph has been built and validated. */
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        return 0;
+    }
+    if (rc != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        return CBM_PIPELINE_ABORT_PRESERVE_DB;
+    }
+
+    int result = 0;
+    int primary_count = 0;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        result = pipeline_check_project_row(stmt, db_path, repo_path, project_name, requested,
+                                            &primary_count);
+        if (result != 0) {
+            break;
+        }
+    }
+    if (primary_count != PL_EXPECTED_PRIMARY_PROJECTS && result == 0) {
+        result = CBM_PIPELINE_ABORT_PRESERVE_DB;
+    }
+    if (rc != SQLITE_DONE && result == 0) {
+        result = CBM_PIPELINE_ABORT_PRESERVE_DB;
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return result;
+}
+
 int cbm_pipeline_run(cbm_pipeline_t *p) {
     /* Per-index attribution: peaks and phase totals are about THIS index, not
      * the process history, so they start clean here. The first mark opens
@@ -3394,7 +3507,15 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
         return CBM_NOT_FOUND;
     }
     char *final_path = resolve_db_path(p);
-    if (!final_path || !ensure_db_parent(final_path)) {
+    if (!final_path) {
+        return CBM_NOT_FOUND;
+    }
+    int root_check = pipeline_check_existing_root(final_path, p->repo_path, p->project_name);
+    if (root_check != 0) {
+        free(final_path);
+        return root_check;
+    }
+    if (!ensure_db_parent(final_path)) {
         free(final_path);
         return CBM_NOT_FOUND;
     }

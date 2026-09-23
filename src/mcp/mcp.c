@@ -9963,6 +9963,22 @@ static char *handle_cross_repo_mode(cbm_mcp_server_t *srv, const char *repo_path
 }
 
 /* Bootstrap from artifact if no local DB exists for this project. */
+static bool artifact_project_names_match(cbm_project_t *projects, int count,
+                                         const char *project_name) {
+    char coverage_project[CBM_SZ_512];
+    cbm_store_coverage_shadow_project(coverage_project, sizeof(coverage_project), project_name);
+    int primary_count = 0;
+    for (int i = 0; i < count; i++) {
+        if (projects[i].name && strcmp(projects[i].name, project_name) == 0) {
+            primary_count++;
+        } else if (!projects[i].name || strcmp(projects[i].name, coverage_project) != 0 ||
+                   !projects[i].root_path || projects[i].root_path[0] != '\0') {
+            return false;
+        }
+    }
+    return primary_count == SKIP_ONE;
+}
+
 static void try_artifact_bootstrap(const char *project_name, const char *repo_path) {
     char db_buf[CBM_SZ_1K];
     project_db_path(project_name, db_buf, sizeof(db_buf));
@@ -9987,9 +10003,37 @@ static void try_artifact_bootstrap(const char *project_name, const char *repo_pa
          *
          * Best-effort: a -1 return leaves every row foreign and falls back to
          * today's behavior, so a failure here can never fail the import. */
-        if (cbm_artifact_import(repo_path, db_buf) == 0) {
-            (void)cbm_artifact_reconcile_hashes(repo_path, db_buf, project_name);
+        /* Rebind a freshly imported graph before exposing it at the serving
+         * path. An existing local index must never get this exception: the
+         * pipeline checks its root before any staging or replacement. */
+        char imported[CBM_SZ_4K];
+        int n = snprintf(imported, sizeof(imported), "%s.bootstrap", db_buf);
+        if (n < 0 || (size_t)n >= sizeof(imported) ||
+            cbm_artifact_import(repo_path, imported) != 0) {
+            return;
         }
+        cbm_store_t *store = cbm_store_open_path(imported);
+        cbm_project_t *projects = NULL;
+        int count = 0;
+        bool compatible = store &&
+                          cbm_store_list_projects(store, &projects, &count) == CBM_STORE_OK &&
+                          artifact_project_names_match(projects, count, project_name);
+        if (compatible) {
+            compatible = cbm_store_upsert_project(store, project_name, repo_path) == CBM_STORE_OK;
+        }
+        cbm_store_free_projects(projects, count);
+        cbm_store_close(store);
+        if (compatible) {
+            (void)cbm_artifact_reconcile_hashes(repo_path, imported, project_name);
+            /* A differently named artifact is rebuilt from source instead of
+             * importing foreign qualified names under a new database key. */
+            if (cbm_file_size(db_buf) < 0 && rename(imported, db_buf) == 0) {
+                cbm_remove_db_sidecars(imported);
+                return;
+            }
+        }
+        cbm_unlink(imported);
+        cbm_remove_db_sidecars(imported);
     }
 }
 
@@ -11176,8 +11220,9 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
      * execution. A supervised worker owns the OS mutation lease itself: if the
      * CLI parent is killed, the worker must keep project exclusion until its
      * parent-death watchdog reaps the complete worker tree. */
-    char *mutation_project =
-        cbm_project_name_from_path(name_override && name_override[0] ? name_override : repo_path);
+    char *mutation_project = name_override && name_override[0]
+                                 ? cbm_project_name_from_literal(name_override)
+                                 : cbm_project_name_from_path(repo_path);
     if (!mutation_project) {
         index_args_free(repo_path, mode_str, name_override);
         return cbm_mcp_text_result("could not resolve index project name", true);
@@ -11371,6 +11416,13 @@ static char *handle_index_repository(cbm_mcp_server_t *srv, const char *args) {
             yyjson_mut_obj_add_int(doc, root, "suggested_budget_mb", suggested_budget_mb);
         }
         yyjson_mut_obj_add_strcpy(doc, root, "hint", hint_text);
+    } else if (rc == CBM_PIPELINE_PROJECT_IDENTITY_CONFLICT) {
+        yyjson_mut_obj_add_str(doc, root, "status", "project_identity_conflict");
+        yyjson_mut_obj_add_str(doc, root, "requested_root", repo_path);
+        yyjson_mut_obj_add_bool(doc, root, "previous_index_preserved", true);
+        yyjson_mut_obj_add_str(doc, root, "error",
+                               "project name is already bound to another repository; "
+                               "use a different name for this checkout");
     } else if (rc == CBM_PIPELINE_ABORT_PRESERVE_DB) {
         /* The truthful abort message (#2020): the old generic "check repo_path"
          * hint sent people debugging a path that was fine, when the run
@@ -11867,6 +11919,17 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
                                     const char *match_method, bool include_neighbors,
                                     cbm_node_t *alternatives, int alt_count, const char *args) {
     char *root_path = get_project_root(srv, node->project);
+
+    bool outside = false;
+    const char *freshness =
+        coverage_path_freshness(srv->store, node->project, root_path, node->file_path, &outside);
+    if (strcmp(freshness, "metadata_match") != 0 && strcmp(freshness, "not_tracked") != 0) {
+        free(root_path);
+        return cbm_mcp_text_result(
+            "source changed since indexing; re-index the project before requesting this "
+            "snippet",
+            true);
+    }
 
     int original_start = node->start_line > 0 ? node->start_line : SKIP_ONE;
     /* A one-line symbol legitimately has end == start. Treat only missing or
@@ -14028,8 +14091,14 @@ static bool scan_and_classify_grep_matches(
                 break;
             }
             if (store) {
-                (void)cbm_store_find_nodes_by_file(store, project, file, &file_nodes,
-                                                   &file_node_count);
+                bool outside = false;
+                const char *freshness =
+                    coverage_path_freshness(store, project, root_path, file, &outside);
+                if (strcmp(freshness, "metadata_match") == 0 ||
+                    strcmp(freshness, "not_tracked") == 0) {
+                    (void)cbm_store_find_nodes_by_file(store, project, file, &file_nodes,
+                                                       &file_node_count);
+                }
             }
         }
 

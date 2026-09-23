@@ -412,25 +412,16 @@ static bool path_is_root_syntax(const char *path) {
     return true;
 }
 
-char *cbm_project_name_from_path(const char *abs_path) {
-    if (!abs_path || !abs_path[0]) {
+char *cbm_project_name_from_literal(const char *name) {
+    if (!name || !name[0]) {
         return strdup("root");
     }
-    if (path_is_root_syntax(abs_path)) {
+    if (path_is_root_syntax(name)) {
         return strdup("root");
-    }
-
-    char real[CBM_SZ_4K];
-    const char *name_path = abs_path;
-    /* Wide-path canonicalization — the ANSI _access/_fullpath pair corrupted
-     * CJK paths on CJK-locale Windows (#973). */
-    if (cbm_canonical_path(abs_path, real, sizeof(real))) {
-        cbm_normalize_path_sep(real);
-        name_path = real;
     }
 
     /* Work on mutable copy */
-    char *path = strdup(name_path);
+    char *path = strdup(name);
     if (!path) {
         return NULL;
     }
@@ -509,8 +500,21 @@ char *cbm_project_name_from_path(const char *abs_path) {
 
     char *result = strdup(start);
     free(path);
-    if (result) {
-        result = fqn_bound_name_len(result); /* #624: cap filename-component length */
+    return fqn_bound_name_len(result); /* #624: cap filename-component length */
+}
+
+char *cbm_project_name_from_path(const char *abs_path) {
+    if (!abs_path || !abs_path[0] || path_is_root_syntax(abs_path)) {
+        return strdup("root");
     }
-    return result;
+
+    char real[CBM_SZ_4K];
+    const char *name_path = abs_path;
+    /* Wide-path canonicalization — the ANSI _access/_fullpath pair corrupted
+     * CJK paths on CJK-locale Windows (#973). */
+    if (cbm_canonical_path(abs_path, real, sizeof(real))) {
+        cbm_normalize_path_sep(real);
+        name_path = real;
+    }
+    return cbm_project_name_from_literal(name_path);
 }

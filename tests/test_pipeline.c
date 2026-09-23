@@ -36,6 +36,7 @@
 /* ── Helper: create temp test repo with known layout ───────────── */
 
 static char g_tmpdir[256];
+static int named_node_count(cbm_store_t *s, const char *project, const char *name);
 
 /* Create:
  *   /tmp/cbm_test_XXXXXX/
@@ -644,6 +645,122 @@ TEST(pipeline_project_name_derived) {
 
     cbm_pipeline_free(p);
     teardown_test_repo();
+    PASS();
+}
+
+TEST(pipeline_project_name_override_is_literal) {
+    cbm_pipeline_t *p = cbm_pipeline_new("/some/path", NULL, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    /* src/ exists under the test runner's working directory. */
+    ASSERT_TRUE(cbm_pipeline_set_project_name(p, "src"));
+    ASSERT_STR_EQ(cbm_pipeline_project_name(p), "src");
+    cbm_pipeline_free(p);
+    PASS();
+}
+
+TEST(pipeline_derived_name_collision_preserves_original_graph) {
+    char *parent = th_mktempdir("cbm_project_collision");
+    ASSERT_NOT_NULL(parent);
+    char first_root[512];
+    char second_root[512];
+    char alias_root[1024];
+    char db_path[512];
+    snprintf(first_root, sizeof(first_root), "%s/a+b", parent);
+    snprintf(second_root, sizeof(second_root), "%s/a@b", parent);
+    snprintf(alias_root, sizeof(alias_root), "%s/../a+b", first_root);
+    snprintf(db_path, sizeof(db_path), "%s/graph.db", parent);
+    ASSERT_EQ(cbm_mkdir(first_root), 0);
+    ASSERT_EQ(cbm_mkdir(second_root), 0);
+    ASSERT_EQ(
+        th_write_file(TH_PATH(first_root, "first.py"), "def OriginalIdentity():\n    return 1\n"),
+        0);
+    ASSERT_EQ(th_write_file(TH_PATH(second_root, "second.py"),
+                            "def CollidingIdentity():\n    return 2\n"),
+              0);
+
+    cbm_pipeline_t *first = cbm_pipeline_new(first_root, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *second = cbm_pipeline_new(second_root, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(first);
+    ASSERT_NOT_NULL(second);
+    ASSERT_STR_EQ(cbm_pipeline_project_name(first), cbm_pipeline_project_name(second));
+    char project[256];
+    snprintf(project, sizeof(project), "%s", cbm_pipeline_project_name(first));
+    ASSERT_EQ(cbm_pipeline_run(first), 0);
+    /* Miss coverage lives in a companion project with an intentionally empty
+     * root. It must not make a genuine same-root reindex look foreign. */
+    char shadow_project[256];
+    snprintf(shadow_project, sizeof(shadow_project), "%s::missed", project);
+    cbm_store_t *shadow_store = cbm_store_open_path(db_path);
+    ASSERT_NOT_NULL(shadow_store);
+    ASSERT_EQ(cbm_store_upsert_project(shadow_store, shadow_project, ""), CBM_STORE_OK);
+    cbm_store_close(shadow_store);
+    ASSERT_EQ(cbm_pipeline_run(second), CBM_PIPELINE_PROJECT_IDENTITY_CONFLICT);
+
+    cbm_store_t *store = cbm_store_open_path_query(db_path);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(named_node_count(store, project, "OriginalIdentity"), 1);
+    ASSERT_EQ(named_node_count(store, project, "CollidingIdentity"), 0);
+    cbm_store_close(store);
+
+    ASSERT_EQ(
+        th_write_file(TH_PATH(first_root, "first.py"), "def ReindexedIdentity():\n    return 3\n"),
+        0);
+    cbm_pipeline_t *same_root = cbm_pipeline_new(alias_root, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(same_root);
+    ASSERT_STR_EQ(cbm_pipeline_project_name(same_root), project);
+    ASSERT_EQ(cbm_pipeline_run(same_root), 0);
+    store = cbm_store_open_path_query(db_path);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(named_node_count(store, project, "ReindexedIdentity"), 1);
+    ASSERT_EQ(named_node_count(store, project, "CollidingIdentity"), 0);
+    cbm_store_close(store);
+
+    cbm_pipeline_free(same_root);
+    cbm_pipeline_free(second);
+    cbm_pipeline_free(first);
+    th_cleanup(parent);
+    PASS();
+}
+
+TEST(pipeline_explicit_name_collision_preserves_original_graph) {
+    char *parent = th_mktempdir("cbm_named_project_collision");
+    ASSERT_NOT_NULL(parent);
+    char first_root[512];
+    char second_root[512];
+    char db_path[512];
+    snprintf(first_root, sizeof(first_root), "%s/first", parent);
+    snprintf(second_root, sizeof(second_root), "%s/second", parent);
+    snprintf(db_path, sizeof(db_path), "%s/graph.db", parent);
+    ASSERT_EQ(cbm_mkdir(first_root), 0);
+    ASSERT_EQ(cbm_mkdir(second_root), 0);
+    ASSERT_EQ(
+        th_write_file(TH_PATH(first_root, "first.py"), "def FirstNamedRoot():\n    return 1\n"), 0);
+    ASSERT_EQ(
+        th_write_file(TH_PATH(second_root, "second.py"), "def SecondNamedRoot():\n    return 2\n"),
+        0);
+
+    cbm_pipeline_t *first = cbm_pipeline_new(first_root, db_path, CBM_MODE_FULL);
+    cbm_pipeline_t *second = cbm_pipeline_new(second_root, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(first);
+    ASSERT_NOT_NULL(second);
+    ASSERT_TRUE(cbm_pipeline_set_project_name(first, "named"));
+    ASSERT_TRUE(cbm_pipeline_set_project_name(second, "named"));
+    ASSERT_EQ(cbm_pipeline_run(first), 0);
+    ASSERT_EQ(cbm_pipeline_run(second), CBM_PIPELINE_PROJECT_IDENTITY_CONFLICT);
+    cbm_pipeline_t *different_name = cbm_pipeline_new(first_root, db_path, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(different_name);
+    ASSERT_TRUE(cbm_pipeline_set_project_name(different_name, "another-name"));
+    ASSERT_EQ(cbm_pipeline_run(different_name), CBM_PIPELINE_PROJECT_IDENTITY_CONFLICT);
+
+    cbm_store_t *store = cbm_store_open_path_query(db_path);
+    ASSERT_NOT_NULL(store);
+    ASSERT_EQ(named_node_count(store, "named", "FirstNamedRoot"), 1);
+    ASSERT_EQ(named_node_count(store, "named", "SecondNamedRoot"), 0);
+    cbm_store_close(store);
+    cbm_pipeline_free(different_name);
+    cbm_pipeline_free(second);
+    cbm_pipeline_free(first);
+    th_cleanup(parent);
     PASS();
 }
 
@@ -5152,13 +5269,14 @@ TEST(pipeline_full_reindex_replaces_legacy_schema_without_quarantine) {
                   legacy, "INSERT INTO projects(name,indexed_at,root_path) VALUES(?1,'legacy',?2);",
                   -1, &insert_project, NULL),
               SQLITE_OK);
-    const char *project_name = strrchr(tmp, '/');
-    project_name = project_name ? project_name + 1 : tmp;
+    char *project_name = cbm_project_name_from_path(tmp);
+    ASSERT_NOT_NULL(project_name);
     ASSERT_EQ(sqlite3_bind_text(insert_project, 1, project_name, -1, SQLITE_TRANSIENT), SQLITE_OK);
     ASSERT_EQ(sqlite3_bind_text(insert_project, 2, tmp, -1, SQLITE_TRANSIENT), SQLITE_OK);
     ASSERT_EQ(sqlite3_step(insert_project), SQLITE_DONE);
     sqlite3_finalize(insert_project);
     sqlite3_close(legacy);
+    free(project_name);
 
     cbm_pipeline_t *pipeline = cbm_pipeline_new(tmp, db_path, CBM_MODE_FULL);
     ASSERT_NOT_NULL(pipeline);
@@ -13387,6 +13505,8 @@ TEST(test_path_directory_patterns) {
     ASSERT_TRUE(cbm_is_test_path("__tests__/Component.js"));
     ASSERT_TRUE(cbm_is_test_path("tests/test_main.py"));
     ASSERT_TRUE(cbm_is_test_path("spec/handler_spec.rb"));
+    ASSERT_TRUE(cbm_is_test_path("Tests/AppTests/HandlerTests.swift"));
+    ASSERT_TRUE(cbm_is_test_path("Tests/Support.swift"));
     PASS();
 }
 
@@ -13396,10 +13516,14 @@ TEST(test_path_suffix_patterns) {
     ASSERT_TRUE(cbm_is_test_path("handler.test.tsx"));
     ASSERT_TRUE(cbm_is_test_path("handler_test.go"));
     ASSERT_TRUE(cbm_is_test_path("test_handler.py"));
+    ASSERT_TRUE(cbm_is_test_path("apps/SidecallTests/AudioChunkMixerTests.swift"));
+    ASSERT_TRUE(cbm_is_test_path("Sources/Module/Test.swift"));
     /* Non-test files */
     ASSERT_FALSE(cbm_is_test_path("handler.ts"));
     ASSERT_FALSE(cbm_is_test_path("contest.go"));
     ASSERT_FALSE(cbm_is_test_path("latest.py"));
+    ASSERT_FALSE(cbm_is_test_path("Sources/TestsHelper.swift"));
+    ASSERT_FALSE(cbm_is_test_path("Sources/Contest.swift"));
     PASS();
 }
 
@@ -15086,6 +15210,9 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_structure_edges);
     RUN_TEST(pipeline_branch_root_structure);
     RUN_TEST(pipeline_project_name_derived);
+    RUN_TEST(pipeline_project_name_override_is_literal);
+    RUN_TEST(pipeline_derived_name_collision_preserves_original_graph);
+    RUN_TEST(pipeline_explicit_name_collision_preserves_original_graph);
     RUN_TEST(pipeline_fast_mode);
     /* Definitions pass */
     RUN_TEST(pipeline_definitions_function_nodes);

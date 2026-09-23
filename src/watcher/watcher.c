@@ -510,6 +510,58 @@ static bool git_has_own_dot_git(const char *root_path) {
     return stat(path, &st) == 0 && (S_ISDIR(st.st_mode) || S_ISREG(st.st_mode));
 }
 
+static char *git_last_path_separator(char *path) {
+    char *forward = strrchr(path, '/');
+    char *backward = strrchr(path, '\\');
+    if (!forward) {
+        return backward;
+    }
+    if (!backward) {
+        return forward;
+    }
+    return forward > backward ? forward : backward;
+}
+
+/* Cheap registration-time hint for both repository roots and tracked
+ * monorepo subdirectories. This only decides whether to capture HEAD early;
+ * init_baseline still uses git_tracks_anything_here to reject a scratch
+ * directory merely nested under an unrelated repository. */
+static bool git_has_ancestor_dot_git(const char *root_path) {
+    enum {
+        UNIX_ROOT_TERMINATOR = 1,
+        DRIVE_COLON_OFFSET = 1,
+        DRIVE_SEPARATOR_OFFSET = 2,
+        DRIVE_ROOT_TERMINATOR = 3,
+    };
+    char directory[CBM_SZ_4K];
+    int written = snprintf(directory, sizeof(directory), "%s", root_path);
+    if (written <= 0 || (size_t)written >= sizeof(directory)) {
+        return false;
+    }
+    for (;;) {
+        if (git_has_own_dot_git(directory)) {
+            return true;
+        }
+        size_t length = strlen(directory);
+        while (length > 0 &&
+               (directory[length - SKIP_ONE] == '/' || directory[length - SKIP_ONE] == '\\')) {
+            directory[--length] = '\0';
+        }
+        char *separator = git_last_path_separator(directory);
+        if (!separator) {
+            return false;
+        }
+        if (separator == directory) {
+            directory[UNIX_ROOT_TERMINATOR] = '\0';
+        } else if (separator == directory + DRIVE_SEPARATOR_OFFSET &&
+                   directory[DRIVE_COLON_OFFSET] == ':') {
+            directory[DRIVE_ROOT_TERMINATOR] = '\0';
+        } else {
+            *separator = '\0';
+        }
+    }
+}
+
 /* Does the ancestor repository actually track anything inside this directory?
  * Emptiness distinguishes "a scratch folder that merely sits under a repo" from
  * "a genuine subdirectory of one". Output is capped: we only care whether the
@@ -1084,6 +1136,14 @@ void cbm_watcher_set_project_mutation_guard(cbm_watcher_t *w,
 
 /* ── Watch list management ──────────────────────────────────────── */
 
+static bool watcher_already_watches_root(cbm_watcher_t *w, const project_state_t *candidate) {
+    cbm_mutex_lock(&w->projects_lock);
+    project_state_t *existing = cbm_ht_get(w->projects, candidate->project_name);
+    bool same_root = existing && strcmp(existing->root_path, candidate->root_path) == 0;
+    cbm_mutex_unlock(&w->projects_lock);
+    return same_root;
+}
+
 bool cbm_watcher_watch(cbm_watcher_t *w, const char *project_name, const char *root_path) {
     if (!w || !project_name || !project_name[0] || !root_path || !root_path[0] ||
         atomic_load_explicit(&w->stopped, memory_order_acquire)) {
@@ -1094,6 +1154,21 @@ bool cbm_watcher_watch(cbm_watcher_t *w, const char *project_name, const char *r
     if (!s) {
         cbm_log_warn("watcher.watch.oom", "project", project_name, "path", root_path);
         return false;
+    }
+
+    if (watcher_already_watches_root(w, s)) {
+        state_free(s);
+        return true;
+    }
+
+    /* Capture HEAD before publishing a new watch. The background poll may
+     * establish its full baseline several seconds later; a commit between
+     * registration and that poll must still be observed as a change. This
+     * probe is deliberately outside projects_lock (git_run takes that lock).
+     * Failure leaves last_head empty and preserves the existing first-poll
+     * fallback. */
+    if (w->index_fn && git_has_ancestor_dot_git(s->root_path)) {
+        (void)git_head(w, s, s->last_head, sizeof(s->last_head));
     }
 
     cbm_mutex_lock(&w->projects_lock);
@@ -1212,6 +1287,36 @@ int cbm_watcher_watch_count(cbm_watcher_t *w) {
 
 /* ── Single poll cycle ──────────────────────────────────────────── */
 
+static bool init_git_baseline(cbm_watcher_t *w, project_state_t *s) {
+    watcher_git_status_t cdup_status = git_repo_cdup(w, s, s->repo_cdup, sizeof(s->repo_cdup));
+    if (cdup_status != WATCHER_GIT_OK && cdup_status != WATCHER_GIT_COMMAND_FAILED) {
+        return false;
+    }
+    char baseline_head[CBM_SZ_128] = {0};
+    watcher_git_status_t head_status = git_head(w, s, baseline_head, sizeof(baseline_head));
+    if (head_status != WATCHER_GIT_OK && head_status != WATCHER_GIT_COMMAND_FAILED) {
+        return false;
+    }
+    if (s->last_head[0] == '\0') {
+        snprintf(s->last_head, sizeof(s->last_head), "%s", baseline_head);
+    }
+    /* last_dirty_sig stays 0 ("clean known"): a tree that is ALREADY
+     * dirty at baseline reindexes once on the first poll — the watcher
+     * cannot know whether that state made it into the DB (e.g. server
+     * restart with a stale artifact). At-least-once, then the signature
+     * gates further polls (#937). */
+    int file_count = 0;
+    watcher_git_status_t file_count_status = git_file_count(w, s, &file_count);
+    if (file_count_status != WATCHER_GIT_OK && file_count_status != WATCHER_GIT_COMMAND_FAILED) {
+        return false;
+    }
+    s->file_count = file_count;
+    s->interval_ms = cbm_watcher_poll_interval_ms(s->file_count);
+    cbm_log_info("watcher.baseline", "project", s->project_name, "strategy", "git", "files",
+                 s->file_count > 0 ? "yes" : "0");
+    return true;
+}
+
 /* Init baseline for a project: check if git, get HEAD, count files */
 static bool init_baseline(cbm_watcher_t *w, project_state_t *s) {
     struct stat st;
@@ -1255,32 +1360,10 @@ static bool init_baseline(cbm_watcher_t *w, project_state_t *s) {
     s->baseline_done = true;
 
     if (s->is_git) {
-        watcher_git_status_t cdup_status = git_repo_cdup(w, s, s->repo_cdup, sizeof(s->repo_cdup));
-        if (cdup_status != WATCHER_GIT_OK && cdup_status != WATCHER_GIT_COMMAND_FAILED) {
+        if (!init_git_baseline(w, s)) {
             s->baseline_done = false;
             return false;
         }
-        watcher_git_status_t head_status = git_head(w, s, s->last_head, sizeof(s->last_head));
-        if (head_status != WATCHER_GIT_OK && head_status != WATCHER_GIT_COMMAND_FAILED) {
-            s->baseline_done = false;
-            return false;
-        }
-        /* last_dirty_sig stays 0 ("clean known"): a tree that is ALREADY
-         * dirty at baseline reindexes once on the first poll — the watcher
-         * cannot know whether that state made it into the DB (e.g. server
-         * restart with a stale artifact). At-least-once, then the signature
-         * gates further polls (#937). */
-        int file_count = 0;
-        watcher_git_status_t file_count_status = git_file_count(w, s, &file_count);
-        if (file_count_status != WATCHER_GIT_OK &&
-            file_count_status != WATCHER_GIT_COMMAND_FAILED) {
-            s->baseline_done = false;
-            return false;
-        }
-        s->file_count = file_count;
-        s->interval_ms = cbm_watcher_poll_interval_ms(s->file_count);
-        cbm_log_info("watcher.baseline", "project", s->project_name, "strategy", "git", "files",
-                     s->file_count > 0 ? "yes" : "0");
     } else {
         cbm_log_info("watcher.baseline", "project", s->project_name, "strategy", "none");
     }

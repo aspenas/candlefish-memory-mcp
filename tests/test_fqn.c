@@ -539,6 +539,15 @@ TEST(project_name_single_segment) {
     PASS();
 }
 
+TEST(project_name_literal_does_not_resolve_cwd_entry) {
+    /* The test runner runs from the repository root, which has a src/
+     * directory. A literal override of "src" must stay "src". */
+    ASSERT_FQN(cbm_project_name_from_literal("src"), "src");
+    ASSERT_FQN(cbm_project_name_from_literal("a+b"), "a-b");
+    ASSERT_FQN(cbm_project_name_from_literal("a@b"), "a-b");
+    PASS();
+}
+
 TEST(project_name_mixed_separators) {
     /* Mix of forward slash, backslash, colon */
     ASSERT_FQN(cbm_project_name_from_path("C:\\Users/dev:proj"), "C-Users-dev-proj");
@@ -775,6 +784,7 @@ SUITE(fqn) {
     RUN_TEST(project_name_null);
     RUN_TEST(project_name_all_slashes);
     RUN_TEST(project_name_single_segment);
+    RUN_TEST(project_name_literal_does_not_resolve_cwd_entry);
     RUN_TEST(project_name_mixed_separators);
     RUN_TEST(project_name_already_dashed);
     RUN_TEST(project_name_deep_path);
