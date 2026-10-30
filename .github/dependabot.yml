@@ -1,4 +1,4 @@
-# Weekly Monday Dependabot version updates grouped into one PR per ecosystem (open PR limit 2).
+# Weekly Monday Dependabot version updates grouped per ecosystem (open PR limit 2).
 version: 2
 updates:
   - package-ecosystem: "docker"
