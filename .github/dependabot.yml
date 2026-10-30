@@ -1,3 +1,4 @@
+# Weekly Monday Dependabot version updates grouped into one PR per ecosystem (open PR limit 2).
 version: 2
 updates:
   - package-ecosystem: "docker"
@@ -7,12 +8,11 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "America/Denver"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     groups:
-      minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
+      docker-dependencies:
+        patterns:
+          - "*"
   - package-ecosystem: "docker"
     directory: "/test-infrastructure"
     schedule:
@@ -20,12 +20,11 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "America/Denver"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     groups:
-      minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
+      docker-dependencies:
+        patterns:
+          - "*"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -33,10 +32,11 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "America/Denver"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     groups:
       actions:
-        patterns: ["*"]
+        patterns:
+          - "*"
   - package-ecosystem: "gomod"
     directory: "/pkg/go"
     schedule:
@@ -44,12 +44,11 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "America/Denver"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     groups:
-      minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
+      gomod-dependencies:
+        patterns:
+          - "*"
   - package-ecosystem: "npm"
     directory: "/graph-ui"
     schedule:
@@ -57,12 +56,11 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "America/Denver"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     groups:
-      minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
+      npm-dependencies:
+        patterns:
+          - "*"
   - package-ecosystem: "npm"
     directory: "/pkg/npm"
     schedule:
@@ -70,12 +68,11 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "America/Denver"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     groups:
-      minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
+      npm-dependencies:
+        patterns:
+          - "*"
   - package-ecosystem: "npm"
     directory: "/tools/tree-sitter-arkts"
     schedule:
@@ -83,12 +80,11 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "America/Denver"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     groups:
-      minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
+      npm-dependencies:
+        patterns:
+          - "*"
   - package-ecosystem: "npm"
     directory: "/tools/tree-sitter-chialisp"
     schedule:
@@ -96,12 +92,11 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "America/Denver"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     groups:
-      minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
+      npm-dependencies:
+        patterns:
+          - "*"
   - package-ecosystem: "npm"
     directory: "/tools/tree-sitter-form"
     schedule:
@@ -109,12 +104,11 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "America/Denver"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     groups:
-      minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
+      npm-dependencies:
+        patterns:
+          - "*"
   - package-ecosystem: "npm"
     directory: "/tools/tree-sitter-magma"
     schedule:
@@ -122,12 +116,11 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "America/Denver"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     groups:
-      minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
+      npm-dependencies:
+        patterns:
+          - "*"
   - package-ecosystem: "pip"
     directory: "/pkg/pypi"
     schedule:
@@ -135,9 +128,8 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "America/Denver"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
     groups:
-      minor-and-patch:
-        update-types:
-          - "minor"
-          - "patch"
+      pip-dependencies:
+        patterns:
+          - "*"
