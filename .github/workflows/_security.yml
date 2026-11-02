@@ -30,7 +30,7 @@ jobs:
       - name: Install ScanCode Toolkit
         run: |
           pipx install scancode-toolkit
-          pipx inject scancode-toolkit 'pluggy<1.7'
+          pipx inject --force scancode-toolkit 'pluggy<1.7'
       - name: "Gate self-test (a planted violation must be detected)"
         run: scripts/license-gate.sh --selftest
       - name: "License compliance gate (one finding fails)"

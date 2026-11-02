@@ -351,7 +351,7 @@ jobs:
   # with detect_leaks=1. Mirrors the local `make -f Makefile.cbm test-lsan`.
   test-lsan-macos:
     if: inputs.include_macos
-    runs-on: macos-latest
+    runs-on: ${{ inputs.include_macos && 'macos-latest' || 'ubuntu-latest' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
