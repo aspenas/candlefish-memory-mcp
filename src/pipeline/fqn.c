@@ -504,15 +504,12 @@ char *cbm_project_name_from_literal(const char *name) {
 }
 
 char *cbm_project_name_from_path(const char *abs_path) {
-    if (!abs_path || !abs_path[0] || path_is_root_syntax(abs_path)) {
-        return strdup("root");
-    }
-
     char real[CBM_SZ_4K];
     const char *name_path = abs_path;
     /* Wide-path canonicalization — the ANSI _access/_fullpath pair corrupted
      * CJK paths on CJK-locale Windows (#973). */
-    if (cbm_canonical_path(abs_path, real, sizeof(real))) {
+    if (abs_path && abs_path[0] && !path_is_root_syntax(abs_path) &&
+        cbm_canonical_path(abs_path, real, sizeof(real))) {
         cbm_normalize_path_sep(real);
         name_path = real;
     }

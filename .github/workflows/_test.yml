@@ -16,6 +16,10 @@ on:
         description: 'Split each C-suite leg across parallel shard jobs (ubuntu x3, windows x2); off = one job per leg, byte-identical to the pre-shard topology'
         type: boolean
         default: false
+      include_macos:
+        description: 'Include macOS legs in test-unix, test-lsan-macos, and test-tsan'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -30,12 +34,14 @@ jobs:
     outputs:
       unix: ${{ steps.set.outputs.unix }}
       windows: ${{ steps.set.outputs.windows }}
+      tsan: ${{ steps.set.outputs.tsan }}
     steps:
       - name: Compute matrices
         id: set
         env:
           BROAD: ${{ inputs.broad_platforms }}
           SHARDS: ${{ inputs.shard_suites }}
+          INCLUDE_MACOS: ${{ inputs.include_macos }}
         run: |
           CORE_UNIX='[
             {"os":"ubuntu-latest","cc":"gcc","cxx":"g++"},
@@ -61,12 +67,23 @@ jobs:
           # is a real (non-optional) gate, not a tolerated emulated-flake.
           CORE_WIN='[{"os":"windows-latest","msystem":"CLANG64","pkg":"x86_64"}]'
           BROAD_WIN='[{"os":"windows-2025","msystem":"CLANG64","pkg":"x86_64"},{"os":"windows-11-arm","msystem":"CLANGARM64","pkg":"aarch64"}]'
+          TSAN='[
+            {"os":"ubuntu-latest","cc":"clang","cxx":"clang++"},
+            {"os":"ubuntu-24.04-arm","cc":"clang","cxx":"clang++"},
+            {"os":"macos-14","cc":"cc","cxx":"c++"}
+          ]'
           if [ "$BROAD" = "true" ]; then
             UNIX=$(jq -cn --argjson a "$CORE_UNIX" --argjson b "$BROAD_UNIX" '$a + $b')
             WIN=$(jq -cn --argjson a "$CORE_WIN" --argjson b "$BROAD_WIN" '$a + $b')
           else
             UNIX=$(jq -cn --argjson a "$CORE_UNIX" '$a')
             WIN=$(jq -cn --argjson a "$CORE_WIN" '$a')
+          fi
+          if [ "$INCLUDE_MACOS" != "true" ]; then
+            UNIX=$(jq -c '[.[] | select(.os | startswith("macos") | not)]' <<< "$UNIX")
+            TSAN=$(jq -c '[.[] | select(.os | startswith("macos") | not)]' <<< "$TSAN")
+          else
+            TSAN=$(jq -cn --argjson a "$TSAN" '$a')
           fi
           # Suite sharding (opt-in via the shard_suites input): each platform's
           # C-suite run is split across N runner jobs. CBM_TEST_SHARD="i/N"
@@ -89,6 +106,7 @@ jobs:
           fi
           echo "unix={\"include\":$UNIX}" >> "$GITHUB_OUTPUT"
           echo "windows={\"include\":$WIN}" >> "$GITHUB_OUTPUT"
+          echo "tsan={\"include\":$TSAN}" >> "$GITHUB_OUTPUT"
 
   test-unix:
     needs: setup-matrix
@@ -332,7 +350,8 @@ jobs:
   # so this leg is the ordinary ASan suite built with that toolchain and run
   # with detect_leaks=1. Mirrors the local `make -f Makefile.cbm test-lsan`.
   test-lsan-macos:
-    runs-on: macos-latest
+    if: inputs.include_macos
+    runs-on: ${{ inputs.include_macos && 'macos-latest' || 'ubuntu-latest' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -370,13 +389,10 @@ jobs:
           key: ccache-lsan-${{ github.ref }}-${{ github.sha }}
 
   test-tsan:
+    needs: setup-matrix
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-latest, cc: clang, cxx: clang++ }
-          - { os: ubuntu-24.04-arm, cc: clang, cxx: clang++ }
-          - { os: macos-14, cc: cc, cxx: c++ }
+      matrix: ${{ fromJSON(needs.setup-matrix.outputs.tsan) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
