@@ -3511,13 +3511,12 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
         return CBM_NOT_FOUND;
     }
     int root_check = pipeline_check_existing_root(final_path, p->repo_path, p->project_name);
+    if (root_check == 0 && !ensure_db_parent(final_path)) {
+        root_check = CBM_NOT_FOUND;
+    }
     if (root_check != 0) {
         free(final_path);
         return root_check;
-    }
-    if (!ensure_db_parent(final_path)) {
-        free(final_path);
-        return CBM_NOT_FOUND;
     }
     struct stat final_st;
     bool final_existed = stat(final_path, &final_st) == 0;

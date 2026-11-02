@@ -12184,14 +12184,15 @@ static char *build_snippet_response(cbm_mcp_server_t *srv, cbm_node_t *node,
                                       original_end);
             char *candidate = snippet_render_payload(doc, args);
             if (candidate && strlen(candidate) <= snippet_byte_budget) {
-                free(best_payload);
+                char *prev = best_payload;
                 best_payload = candidate;
+                candidate = prev;
                 best_lines = middle;
                 low = middle + 1;
             } else {
-                free(candidate);
                 high = middle - 1;
             }
+            free(candidate);
         }
         free(payload);
         if (best_payload) {
